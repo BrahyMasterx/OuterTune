@@ -60,7 +60,7 @@ object SignatureCipherManager {
                 return@withLock null
             }
 
-            val config = PlayerCipherConfigStore.get(playerHash)
+            var config = PlayerCipherConfigStore.get(playerHash)
             if (config == null) {
                 if (attempt == 0 && fromCache) {
                     // The cached player.js may be stale; refetch once in case the current player is
@@ -69,9 +69,17 @@ object SignatureCipherManager {
                     PlayerJsFetcher.invalidate()
                     continue
                 }
+                // player.js is current but unknown to us, so our config set is behind the rotation:
+                // pull the upstream set (rate limited internally) before giving up.
                 Log.w(TAG, "[$videoId] no cipher config for player $playerHash " +
-                        "(${PlayerCipherConfigStore.knownHashes().size} known players)")
-                return@withLock null
+                        "(${PlayerCipherConfigStore.knownHashes().size} known players); refreshing configs")
+                if (PlayerCipherConfigStore.refreshFromRemote()) {
+                    config = PlayerCipherConfigStore.get(playerHash)
+                }
+                if (config == null) {
+                    Log.w(TAG, "[$videoId] player $playerHash still unsupported after config refresh")
+                    return@withLock null
+                }
             }
 
             val finalUrl = try {

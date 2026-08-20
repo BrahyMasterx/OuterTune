@@ -8,9 +8,18 @@
 
 package com.dd3boh.outertune.utils.cipher
 
+import android.os.SystemClock
 import android.util.Log
 import com.dd3boh.outertune.App
+import com.zionhuang.innertube.YouTube
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
+import java.io.File
 
 /**
  * Signature deobfuscation config for one player.js, looked up by its hash and used by [CipherWebView].
@@ -30,26 +39,179 @@ data class PlayerCipherConfig(
 /**
  * Provides player.js cipher configs keyed by the 8-hex player hash (aliases included).
  *
- * The data is the bundled `player_configs.json` from ZemerTeam/zemer-cipher
- * (https://github.com/ZemerTeam/zemer-cipher, GPL-3.0), whose upstream validates each entry
- * against the live CDN before shipping it. It is bundled only, with no runtime fetch: to follow a
- * new YouTube player rotation, refresh the bundled file from upstream and release a new build.
+ * The data is `player_configs.json` from ZemerTeam/zemer-cipher
+ * (https://github.com/ZemerTeam/zemer-cipher, GPL-3.0), whose upstream validates each entry against
+ * the live CDN before shipping it.
+ *
+ * A copy is bundled in the assets so playback works offline and on a fresh install, but YouTube
+ * rotates player.js every few days, which makes any bundled snapshot go stale within weeks. So the
+ * bundle is only the floor: when a player turns up that no known config covers, [refreshFromRemote]
+ * pulls the current set from upstream and caches it in the app's files dir. Both sources are merged
+ * (remote wins on conflicts), so a truncated or pruned remote file can never lose bundled entries.
  */
 object PlayerCipherConfigStore {
 
     private const val TAG = "PlayerCipherConfig"
     private const val ASSET_NAME = "player_configs.json"
+    private const val CACHE_NAME = "player_configs.json"
+    private const val REMOTE_URL =
+        "https://raw.githubusercontent.com/ZemerTeam/zemer-cipher/master/library/src/main/assets/player_configs.json"
 
-    private val configs: Map<String, PlayerCipherConfig> by lazy { load() }
+    /** Only this schema is understood; anything else is ignored so a future format cannot corrupt the map. */
+    private const val SCHEMA_VERSION = 1
 
-    fun get(playerHash: String?): PlayerCipherConfig? = playerHash?.let { configs[it] }
+    /** Sanity cap on the downloaded file; the real one is tens of KB. */
+    private const val MAX_CONFIG_CHARS = 4 * 1024 * 1024
+
+    /**
+     * Minimum time between network attempts. A player that stays unknown (upstream has not published
+     * it yet) must not cause a fetch for every played song.
+     */
+    private const val MIN_REFRESH_INTERVAL_MS = 15 * 60 * 1000L
+
+    @Volatile
+    private var loaded: Map<String, PlayerCipherConfig>? = null
+
+    private val refreshMutex = Mutex()
+
+    @Volatile
+    private var lastRefreshAtMs = 0L
+
+    private val httpClient by lazy {
+        OkHttpClient.Builder()
+            .proxy(YouTube.proxy)
+            .build()
+    }
+
+    fun get(playerHash: String?): PlayerCipherConfig? = playerHash?.let { current()[it] }
 
     /** All known player hashes, aliases included. For diagnostics only. */
-    fun knownHashes(): Set<String> = configs.keys
+    fun knownHashes(): Set<String> = current().keys
 
-    private fun load(): Map<String, PlayerCipherConfig> = try {
+    /**
+     * Fetches the current config set from upstream, caches it and merges it into the map.
+     *
+     * Rate limited to one network attempt per [MIN_REFRESH_INTERVAL_MS]; call it when a player hash
+     * misses, not speculatively.
+     *
+     * @return true if the map gained hashes it did not have before
+     */
+    suspend fun refreshFromRemote(): Boolean = refreshMutex.withLock {
+        val now = SystemClock.elapsedRealtime()
+        val sinceLast = now - lastRefreshAtMs
+        if (lastRefreshAtMs != 0L && sinceLast < MIN_REFRESH_INTERVAL_MS) {
+            Log.d(TAG, "Skipping remote refresh, last attempt ${sinceLast / 1000}s ago")
+            return@withLock false
+        }
+        lastRefreshAtMs = now
+
+        val text = withContext(Dispatchers.IO) { download() } ?: return@withLock false
+        val remote = runCatching { parse(text) }.getOrElse {
+            Log.e(TAG, "Could not parse remote configs", it)
+            emptyMap()
+        }
+        if (remote.isEmpty()) {
+            Log.w(TAG, "Remote configs held no usable entries, keeping current map")
+            return@withLock false
+        }
+
+        writeCache(text)
+        val added = merge(remote)
+        Log.i(TAG, "Refreshed player cipher configs: ${remote.size} remote entries, ${added.size} new")
+        added.isNotEmpty()
+    }
+
+    @Synchronized
+    private fun current(): Map<String, PlayerCipherConfig> = loaded ?: load().also { loaded = it }
+
+    /** Folds [remote] into the live map and returns the hashes that were not known before. */
+    @Synchronized
+    private fun merge(remote: Map<String, PlayerCipherConfig>): Set<String> {
+        val before = current()
+        loaded = before + remote
+        return remote.keys - before.keys
+    }
+
+    private fun load(): Map<String, PlayerCipherConfig> {
+        val bundled = readAsset()
+        val cached = readCache()
+        if (cached.isEmpty()) {
+            Log.d(TAG, "Loaded ${bundled.size} player cipher configs (bundled only)")
+            return bundled
+        }
+        // cached entries win, bundled ones are kept as a floor
+        val merged = bundled + cached
+        Log.d(TAG, "Loaded ${merged.size} player cipher configs " +
+                "(${bundled.size} bundled, ${cached.size} cached)")
+        return merged
+    }
+
+    private fun readAsset(): Map<String, PlayerCipherConfig> = try {
         val text = App.instance.assets.open(ASSET_NAME).bufferedReader().use { it.readText() }
-        val players = JSONObject(text).getJSONObject("players")
+        parse(text)
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to load $ASSET_NAME", e)
+        emptyMap()
+    }
+
+    private fun readCache(): Map<String, PlayerCipherConfig> = try {
+        val file = File(App.instance.filesDir, CACHE_NAME)
+        if (file.exists()) parse(file.readText()) else emptyMap()
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to read cached configs", e)
+        emptyMap()
+    }
+
+    // Written via a temp file so a kill mid-write cannot leave a half-file that shadows the bundle.
+    private fun writeCache(text: String) {
+        try {
+            val dir = App.instance.filesDir
+            val target = File(dir, CACHE_NAME)
+            val tmp = File(dir, "$CACHE_NAME.tmp")
+            tmp.writeText(text)
+            if (!tmp.renameTo(target)) {
+                target.delete()
+                if (!tmp.renameTo(target)) {
+                    tmp.delete()
+                    Log.w(TAG, "Could not move cached configs into place")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to cache configs", e)
+        }
+    }
+
+    private fun download(): String? = try {
+        val request = Request.Builder().url(REMOTE_URL).build()
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                Log.e(TAG, "Config fetch failed: HTTP ${response.code}")
+                null
+            } else {
+                val text = response.body?.string()
+                when {
+                    text == null -> null
+                    text.length > MAX_CONFIG_CHARS -> {
+                        Log.e(TAG, "Config fetch rejected: ${text.length} chars")
+                        null
+                    }
+                    else -> text
+                }
+            }
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "Config fetch failed", e)
+        null
+    }
+
+    private fun parse(text: String): Map<String, PlayerCipherConfig> {
+        val root = JSONObject(text)
+        val schemaVersion = root.optInt("schemaVersion", -1)
+        if (schemaVersion != SCHEMA_VERSION) {
+            Log.w(TAG, "Ignoring configs with unsupported schemaVersion $schemaVersion")
+            return emptyMap()
+        }
+        val players = root.getJSONObject("players")
         val result = mutableMapOf<String, PlayerCipherConfig>()
         players.keys().forEach { hash ->
             val entry = players.getJSONObject(hash)
@@ -61,11 +223,7 @@ object PlayerCipherConfigStore {
                 }
             }
         }
-        Log.d(TAG, "Loaded ${result.size} player cipher configs")
-        result
-    } catch (e: Exception) {
-        Log.e(TAG, "Failed to load $ASSET_NAME", e)
-        emptyMap()
+        return result
     }
 
     // sig is a `name(int,int,INPUT)` call; returns null on any malformed field so one bad entry can't break the map.
