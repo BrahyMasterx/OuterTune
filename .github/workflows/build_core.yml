@@ -1,4 +1,4 @@
-name: Build core APK for pre release
+name: Build core APK
 on:
   workflow_dispatch:
 
@@ -46,11 +46,11 @@ jobs:
 
       # Compilación de la variante Core
       - name: Build core APK
-        run: ./gradlew assembleCoreDebug
+        run: ./gradlew assembleCoreRelease
 
       - name: Upload Core APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: core-userdebug-apk-${{ env.date_tag }}
-          path: app/build/outputs/apk/core/debug/*.apk
+          path: app/build/outputs/apk/core/release/*.apk
           retention-days: 7
