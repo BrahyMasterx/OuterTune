@@ -23,15 +23,17 @@ jobs:
       - name: Accept SDK licenses
         run: yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses
 
-      # Genera un Keystore genérico temporal dentro de /app
+    # Crea el keystore y el archivo de propiedades directamente DENTRO de la carpeta /app
       - name: Create fallback debug keystore
         run: |
-          keytool -genkey -v -keystore test.jks -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          keytool -genkey -v -keystore app/test.jks -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          echo "storeFile=test.jks" > app/keystore.properties
+          echo "storePassword=android" >> app/keystore.properties
+          echo "keyAlias=androiddebugkey" >> app/keystore.properties
+          echo "keyPassword=android" >> app/keystore.properties
+          
+          # Copia de seguridad en la raíz por si Gradle lo busca en la raíz del repositorio
           echo "storeFile=app/test.jks" > keystore.properties
-          echo "storePassword=android" >> keystore.properties
-          echo "keyAlias=androiddebugkey" >> keystore.properties
-          echo "keyPassword=android" >> keystore.properties
-
       - name: Get date-time string
         id: datetime
         run: |
