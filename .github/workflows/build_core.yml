@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1 # Descarga rápida solo del último commit
           submodules: recursive
 
       - name: set up JDK 21
@@ -16,16 +16,19 @@ jobs:
         with:
           java-version: 21
           distribution: "temurin"
-          cache: 'gradle'
+
+      # Optimización del caché de Gradle para compilaciones más rápidas
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
 
       - name: Accept SDK licenses
         run: yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses
 
-      # Genera un Keystore genérico temporal y su archivo keystore.properties
+      # Genera un Keystore genérico temporal dentro de /app
       - name: Create fallback debug keystore
         run: |
           keytool -genkey -v -keystore app/test.jks -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          echo "storeFile=test.jks" > keystore.properties
+          echo "storeFile=app/test.jks" > keystore.properties
           echo "storePassword=android" >> keystore.properties
           echo "keyAlias=androiddebugkey" >> keystore.properties
           echo "keyPassword=android" >> keystore.properties
@@ -36,17 +39,14 @@ jobs:
           DATE_TAG=$(date +'%Y-%m-%d_%H-%M-%S')
           echo "date_tag=$DATE_TAG" >> $GITHUB_ENV
 
-      # Solamente se compila la variante Core
+      # Compilación de la variante Core
       - name: Build core userdebug APK
-        run: ./gradlew assembleCoreUserdebug
+        run: ./gradlew assembleCoreUserdebug -x test -x lint --build-cache --parallel
 
-      - name: Create github userdebug draft
-        uses: softprops/action-gh-release@v2
+      # Subir el APK como Artefacto (en lugar de crear la Pre-release)
+      - name: Upload Core APK Artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: build-${{ env.date_tag }}
-          name: "Build ${{ env.date_tag }}"
-          draft: true
-          files: |
-            app/build/outputs/apk/core/userdebug/*.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: core-userdebug-apk-${{ env.date_tag }}
+          path: app/build/outputs/apk/core/userdebug/*.apk
+          retention-days: 7 # Tiempo que se conservará el archivo en GitHub
