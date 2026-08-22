@@ -21,13 +21,14 @@ jobs:
       - name: Accept SDK licenses
         run: yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses
 
-      - name: Setup signing configs
+      # Se genera una clave debug temporal para satisfacer la compilación si el proyecto exige un archivo .jks
+      - name: Create fallback debug keystore
         run: |
-          echo "$KEYSTORE" | base64 --decode > test.jks
-          echo "$KEYSTORE_PROPERTIES" > keystore.properties
-        env:
-          KEYSTORE: ${{ secrets.KEYSTORE }}
-          KEYSTORE_PROPERTIES: ${{ secrets.KEYSTORE_PROPERTIES }}
+          keytool -genkey -v -keystore test.jks -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          echo "storeFile=test.jks" > keystore.properties
+          echo "storePassword=android" >> keystore.properties
+          echo "keyAlias=androiddebugkey" >> keystore.properties
+          echo "keyPassword=android" >> keystore.properties
 
       - name: Get date-time string
         id: datetime
@@ -54,4 +55,4 @@ jobs:
             app/build/outputs/apk/core/userdebug/*.apk
             app/build/outputs/apk/full/userdebug/*.apk
         env:
-          GITHUB_TOKEN: ${{ secrets.REL_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Se cambia a GITHUB_TOKEN nativo
