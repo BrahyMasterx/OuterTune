@@ -24,7 +24,7 @@ jobs:
       # Genera un Keystore genérico temporal y su archivo keystore.properties
       - name: Create fallback debug keystore
         run: |
-          keytool -genkey -v -keystore test.jks -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          keytool -genkey -v -keystore app/test.jks -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           echo "storeFile=test.jks" > keystore.properties
           echo "storePassword=android" >> keystore.properties
           echo "keyAlias=androiddebugkey" >> keystore.properties
