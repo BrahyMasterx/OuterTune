@@ -37,6 +37,7 @@ jobs:
           
           # Copia la misma configuración dentro de /app por si el subproyecto la busca aislada
           cp keystore.properties app/keystore.properties
+          
       - name: Get date-time string
         id: datetime
         run: |
@@ -44,13 +45,12 @@ jobs:
           echo "date_tag=$DATE_TAG" >> $GITHUB_ENV
 
       # Compilación de la variante Core
-      - name: Build core userdebug APK
-        run: ./gradlew assembleCoreUserdebug -x test -x lint --build-cache --parallel
+      - name: Build core APK
+        run: ./gradlew assembleCoreDebug
 
-      # Subir el APK como Artefacto (en lugar de crear la Pre-release)
       - name: Upload Core APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: core-userdebug-apk-${{ env.date_tag }}
-          path: app/build/outputs/apk/core/userdebug/*.apk
-          retention-days: 7 # Tiempo que se conservará el archivo en GitHub
+          path: app/build/outputs/apk/core/*.apk
+          retention-days: 7
