@@ -1,4 +1,4 @@
-name: Build APKs for pre release
+name: Build core APK for pre release
 on:
   workflow_dispatch:
 
